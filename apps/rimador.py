@@ -1,5 +1,6 @@
 import asyncio
-from urllib.parse import urlsplit
+import base64
+from urllib.parse import quote, urlsplit
 
 import flet as ft
 from flet_audio_recorder import (
@@ -13,16 +14,36 @@ from multimedia import ia_media, pcm_a_wav
 
 
 INSTRUCCION = (
-    "Escribe una rima original sobre el tema indicado, formada exactamente "
-    "por cuatro versos. Los versos deben tener ritmo y rima entre sí, ser "
-    "naturales y apropiados. Devuelve únicamente un objeto JSON con la clave "
-    "\"versos\", cuyo valor sea una lista de exactamente cuatro cadenas."
+    "Escribe una rima original sobre la entrada indicada, formada exactamente "
+    "por cuatro versos que rimen entre sí. Devuelve únicamente un objeto JSON "
+    "con las claves \"titulo\", \"verso1\", \"verso2\", \"verso3\", \"verso4\" "
+    "y \"estilo\". Todos los valores deben ser cadenas de texto; el estilo "
+    "debe corresponder al solicitado."
 )
 
 INSTRUCCION_TRANSCRIPCION = (
     "Transcribe únicamente las palabras que dice la persona en el audio. "
     "Devuelve la transcripción en español, sin explicaciones ni comillas."
 )
+
+DETALLE_ESTILOS = {
+    "rap": (
+        "usa barras rítmicas, lenguaje urbano y rimas contundentes, "
+        "incluidas rimas internas cuando encajen"
+    ),
+    "bolero": (
+        "usa un tono romántico y melódico, imágenes emotivas y frases "
+        "líricas propias de una canción"
+    ),
+    "reguetón": (
+        "usa cadencia urbana bailable, frases breves y rítmicas, y un "
+        "vocabulario actual apropiado"
+    ),
+    "poesia_clasica": (
+        "usa dicción poética clásica, cadencia regular y métrica cuidada, "
+        "con imágenes y recursos literarios tradicionales"
+    ),
+}
 
 
 def vista(page):
@@ -42,6 +63,10 @@ def vista(page):
             ft.DropdownOption(key="rap", text="Rap"),
             ft.DropdownOption(key="bolero", text="Bolero"),
             ft.DropdownOption(key="reguetón", text="Reguetón"),
+            ft.DropdownOption(
+                key="poesia_clasica",
+                text="Poesía Clásica",
+            ),
         ],
         border_color=ft.Colors.CYAN_400,
         focused_border_color=ft.Colors.CYAN,
@@ -49,12 +74,59 @@ def vista(page):
         text_style=ft.TextStyle(color=ft.Colors.WHITE),
         expand=True,
     )
+    humor_valor = ft.Text(
+        "Nivel de humor: 1/5",
+        color=ft.Colors.CYAN_200,
+    )
+    humor = ft.Slider(
+        min=1,
+        max=5,
+        divisions=4,
+        value=1,
+        label="{value}",
+        active_color=ft.Colors.CYAN_400,
+        thumb_color=ft.Colors.CYAN_300,
+    )
     mensaje = ft.Text(color=ft.Colors.CYAN_200)
-    versos = ft.Column(spacing=10)
+    poema = ft.Column(spacing=10)
+    historial = []
+    historial_vista = ft.ListView(
+        height=260,
+        spacing=10,
+        auto_scroll=False,
+    )
+    historial_panel = ft.Column(
+        controls=[
+            ft.Text(
+                "Historial de rimas",
+                size=20,
+                weight=ft.FontWeight.BOLD,
+                color=ft.Colors.CYAN_200,
+            ),
+            historial_vista,
+        ],
+        spacing=8,
+    )
+    rima_actual = None
     boton = ft.Button(
         "Crear rima",
         bgcolor=ft.Colors.CYAN_700,
         color=ft.Colors.WHITE,
+    )
+    boton_copiar = ft.Button(
+        "Copiar Rima",
+        icon=ft.Icons.COPY,
+        bgcolor=ft.Colors.GREY_800,
+        color=ft.Colors.CYAN_200,
+        disabled=True,
+    )
+    boton_escuchar = ft.Button(
+        "Escuchar Rima",
+        icon=ft.Icons.VOLUME_UP,
+        tooltip="Reproducir la rima en español",
+        bgcolor=ft.Colors.GREY_800,
+        color=ft.Colors.CYAN_200,
+        disabled=True,
     )
     boton_microfono = ft.Button(
         "Grabar voz",
@@ -102,6 +174,22 @@ def vista(page):
     if selector not in page.services:
         page.services.append(selector)
 
+    portapapeles = ft.Clipboard()
+    if portapapeles not in page.services:
+        page.services.append(portapapeles)
+
+    lanzador_url = ft.UrlLauncher()
+    if lanzador_url not in page.services:
+        page.services.append(lanzador_url)
+
+    snackbar_copiado = ft.SnackBar(
+        content="¡Rima copiada!",
+        duration=2500,
+        bgcolor=ft.Colors.GREY_800,
+        open=False,
+    )
+    page.overlay.append(snackbar_copiado)
+
     vista_app = ft.Container(
         content=ft.Column(
             controls=[
@@ -117,6 +205,8 @@ def vista(page):
                 ),
                 tema,
                 estilo,
+                humor_valor,
+                humor,
                 boton_foto,
                 nombre_foto,
                 ft.Text(
@@ -129,9 +219,11 @@ def vista(page):
                 info_documento,
                 boton_microfono,
                 boton,
+                boton_copiar,
                 progreso,
                 mensaje,
-                versos,
+                poema,
+                historial_panel,
             ],
             spacing=16,
             expand=True,
@@ -148,9 +240,22 @@ def vista(page):
         boton_foto.disabled = cargando
         boton_texto.disabled = cargando
         boton_microfono.disabled = cargando and not permitir_detener
+        boton_escuchar.disabled = cargando or rima_actual is None
         progreso.visible = cargando
         if texto is not None:
             mensaje.value = texto
+        page.update()
+
+    def nombre_estilo():
+        return {
+            "rap": "Rap",
+            "bolero": "Bolero",
+            "reguetón": "Reguetón",
+            "poesia_clasica": "Poesía Clásica",
+        }[estilo.value]
+
+    def actualizar_humor(_):
+        humor_valor.value = f"Nivel de humor: {int(humor.value)}/5"
         page.update()
 
     def validar_entrada(texto):
@@ -167,10 +272,107 @@ def vista(page):
             return None
         return texto
 
+    def tarjetas_rima(rima):
+        controles = [
+            ft.Card(
+                content=ft.Container(
+                    content=ft.Column(
+                        controls=[
+                            ft.Row(
+                                controls=[
+                                    ft.Text(
+                                        rima["titulo"],
+                                        size=22,
+                                        weight=ft.FontWeight.BOLD,
+                                        color=ft.Colors.CYAN_300,
+                                        expand=True,
+                                    ),
+                                    boton_escuchar,
+                                ],
+                                spacing=12,
+                            ),
+                            ft.Text(
+                                f"Estilo: {rima['estilo']}",
+                                color=ft.Colors.GREY_300,
+                            ),
+                        ],
+                        spacing=8,
+                    ),
+                    padding=16,
+                ),
+                bgcolor=ft.Colors.GREY_800,
+                elevation=2,
+            )
+        ]
+        controles.extend(
+            ft.Card(
+                content=ft.Container(
+                    content=ft.Row(
+                        controls=[
+                            ft.Text(
+                                f"{numero}.",
+                                color=ft.Colors.CYAN_300,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                            ft.Text(
+                                rima[f"verso{numero}"],
+                                color=ft.Colors.WHITE,
+                                expand=True,
+                            ),
+                        ],
+                        spacing=10,
+                    ),
+                    padding=14,
+                ),
+                bgcolor=ft.Colors.GREY_900,
+                elevation=1,
+            )
+            for numero in range(1, 5)
+        )
+        return controles
+
+    def actualizar_historial():
+        historial_vista.controls.clear()
+        for rima in reversed(historial):
+            historial_vista.controls.append(
+                ft.Card(
+                    content=ft.Container(
+                        content=ft.Column(
+                            controls=[
+                                ft.Text(
+                                    rima["titulo"],
+                                    size=18,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=ft.Colors.CYAN_300,
+                                ),
+                                ft.Text(
+                                    " · ".join(
+                                        rima[f"verso{numero}"]
+                                        for numero in range(1, 5)
+                                    ),
+                                    color=ft.Colors.WHITE,
+                                ),
+                                ft.Text(
+                                    f"Estilo: {rima['estilo']}",
+                                    color=ft.Colors.GREY_400,
+                                    size=12,
+                                ),
+                            ],
+                            spacing=6,
+                        ),
+                        padding=12,
+                    ),
+                    bgcolor=ft.Colors.GREY_800,
+                    elevation=1,
+                )
+            )
+
     async def generar_rima(texto, instruccion_rima=None, gestionar_carga=True):
+        nonlocal rima_actual
+
         texto = validar_entrada(texto)
         if texto is None:
-            versos.controls.clear()
+            poema.controls.clear()
             page.update()
             return False
 
@@ -179,40 +381,73 @@ def vista(page):
         else:
             mensaje.value = "Componiendo la rima..."
             page.update()
-        versos.controls.clear()
+        poema.controls.clear()
         page.update()
 
         try:
             # Ejecuta la llamada bloqueante sin congelar la interfaz.
-            instruccion = instruccion_rima or (
-                f"{INSTRUCCION} Usa el estilo musical {estilo.value}."
+            instruccion = instruccion_rima or INSTRUCCION
+            nivel_humor = int(humor.value)
+            estilo_seleccionado = nombre_estilo()
+            intensidad_humor = {
+                1: "humor casi nulo y muy sutil",
+                2: "humor ligero y discreto",
+                3: "humor moderado",
+                4: "humor marcado y frecuente",
+                5: "humor muy alto, ingenioso y presente en los cuatro versos",
+            }[nivel_humor]
+            instruccion += (
+                f"\n\nEstilo seleccionado: {estilo_seleccionado} "
+                f"({estilo.value}). "
+                f"Aplica estrictamente sus rasgos: "
+                f"{DETALLE_ESTILOS[estilo.value]}. Mantén su vocabulario, "
+                "ritmo, cadencia y métrica de principio a fin; no mezcles "
+                "géneros ni estilos. En el campo JSON \"estilo\", escribe "
+                f"exactamente \"{estilo_seleccionado}\". "
+                f"Nivel de humor seleccionado: {nivel_humor}/5 "
+                f"({intensidad_humor}). Ajusta el humor a ese nivel sin "
+                "sacrificar la rima ni la naturalidad."
             )
+            rimas_anteriores = historial + (
+                [rima_actual] if rima_actual is not None else []
+            )
+            if rimas_anteriores:
+                contexto = "\n".join(
+                    f"- {rima['titulo']}: "
+                    + " / ".join(
+                        rima[f"verso{numero}"] for numero in range(1, 5)
+                    )
+                    for rima in rimas_anteriores[-5:]
+                )
+                instruccion += (
+                    "\n\nUsa estas rimas anteriores solo como contexto para "
+                    "mantener coherencia. No repitas sus títulos ni versos "
+                    "literalmente:\n"
+                    f"{contexto}"
+                )
             respuesta = await asyncio.to_thread(
                 ia, instruccion, texto, como_json=True
             )
-            lineas = respuesta.get("versos") if isinstance(respuesta, dict) else None
-            if (
-                not isinstance(lineas, list)
-                or len(lineas) != 4
-                or any(not isinstance(linea, str) or not linea.strip() for linea in lineas)
+            campos = ("titulo", "verso1", "verso2", "verso3", "verso4", "estilo")
+            if not isinstance(respuesta, dict) or any(
+                not isinstance(respuesta.get(campo), str)
+                or not respuesta[campo].strip()
+                for campo in campos
             ):
-                raise ValueError("La respuesta no contiene cuatro versos.")
+                raise ValueError("La respuesta JSON no tiene todos los campos.")
 
-            # Python numera los versos para mantener el formato consistente.
-            versos.controls.extend(
-                ft.Row(
-                    controls=[
-                        ft.Text(
-                            f"{numero}.",
-                            color=ft.Colors.CYAN_300,
-                            weight=ft.FontWeight.BOLD,
-                        ),
-                        ft.Text(linea.strip(), color=ft.Colors.WHITE, expand=True),
-                    ],
-                    spacing=10,
-                )
-                for numero, linea in enumerate(lineas, start=1)
-            )
+            nueva_rima = {
+                campo: respuesta[campo].strip()
+                for campo in campos
+            }
+            if rima_actual is not None:
+                historial.append(rima_actual)
+                del historial[:-5]
+            rima_actual = nueva_rima
+            poema.controls.extend(tarjetas_rima(rima_actual))
+            actualizar_historial()
+            boton_copiar.disabled = False
+            boton_escuchar.disabled = False
             mensaje.value = ""
             return True
         except RuntimeError as error:
@@ -236,6 +471,10 @@ def vista(page):
                     "No pude crear la rima. Revisa la conexión y la "
                     "configuración de Gemini e inténtalo de nuevo."
                 )
+        except ValueError:
+            mensaje.value = (
+                "No pude interpretar la rima recibida. Inténtalo de nuevo."
+            )
         except Exception:
             # Muestra un aviso sencillo sin exponer detalles técnicos.
             mensaje.value = (
@@ -246,6 +485,101 @@ def vista(page):
                 actualizar_carga(False)
             else:
                 page.update()
+
+    async def copiar_rima(_):
+        if rima_actual is None:
+            return
+
+        texto_rima = "\n".join(
+            [
+                rima_actual["titulo"],
+                f"Estilo: {rima_actual['estilo']}",
+                *(rima_actual[f"verso{numero}"] for numero in range(1, 5)),
+            ]
+        )
+        try:
+            await portapapeles.set(texto_rima)
+            snackbar_copiado.open = True
+            page.update()
+        except Exception:
+            snackbar_copiado.content = "No se pudo copiar la rima al portapapeles."
+            snackbar_copiado.open = True
+            page.update()
+
+    async def escuchar_rima(_):
+        if rima_actual is None:
+            return
+
+        texto_rima = "\n".join(
+            [rima_actual["titulo"]]
+            + [rima_actual[f"verso{numero}"] for numero in range(1, 5)]
+        )
+        # Codifica el texto para que nunca se interprete como código JavaScript.
+        texto_codificado = base64.b64encode(
+            texto_rima.encode("utf-8")
+        ).decode("ascii")
+        documento = f"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Escuchar rima</title>
+  <style>
+    body {{ background: #212121; color: #fff; font: 18px sans-serif;
+           margin: 2rem auto; max-width: 42rem; padding: 0 1rem; }}
+    button {{ background: #00acc1; border: 0; border-radius: 8px;
+             color: #fff; cursor: pointer; font: inherit; padding: 0.8rem 1rem; }}
+    pre {{ line-height: 1.7; white-space: pre-wrap; }}
+  </style>
+</head>
+<body>
+  <h1>Tu rima</h1>
+  <pre id="rima"></pre>
+  <button type="button" id="reproducir">Escuchar Rima</button>
+  <p id="aviso" role="status" aria-live="polite"></p>
+  <script>
+    const bytes = Uint8Array.from(atob("{texto_codificado}"),
+      caracter => caracter.charCodeAt(0));
+    const rima = new TextDecoder().decode(bytes);
+    document.getElementById("rima").textContent = rima;
+    function reproducir() {{
+      if (!("speechSynthesis" in window)) {{
+        document.getElementById("aviso").textContent =
+          "Este navegador no admite síntesis de voz.";
+        return;
+      }}
+      window.speechSynthesis.cancel();
+      const voz = new SpeechSynthesisUtterance(rima);
+      voz.lang = "es-ES";
+      const voces = window.speechSynthesis.getVoices();
+      voz.voice = voces.find(opcion => opcion.lang.toLowerCase().startsWith("es"))
+        || null;
+      document.getElementById("aviso").textContent = "";
+      window.speechSynthesis.speak(voz);
+    }}
+    document.getElementById("reproducir").addEventListener("click", reproducir);
+    window.addEventListener("load", reproducir);
+  </script>
+</body>
+</html>"""
+        url_reproductor = (
+            "data:text/html;charset=utf-8," + quote(documento, safe="")
+        )
+        try:
+            mensaje.value = "Abriendo la reproducción de voz..."
+            page.update()
+            await lanzador_url.launch_url(
+                url_reproductor,
+                web_only_window_name="_blank",
+            )
+            mensaje.value = ""
+        except Exception:
+            mensaje.value = (
+                "No pude abrir la reproducción. Inténtalo en un navegador "
+                "compatible con síntesis de voz."
+            )
+        finally:
+            page.update()
 
     async def crear_rima(_):
         await generar_rima((tema.value or "").strip())
@@ -270,7 +604,7 @@ def vista(page):
             nombre_foto.value = f"Imagen: {foto.name}"
             mensaje.value = "Leyendo el texto de la imagen..."
             texto_leido_imagen.value = ""
-            versos.controls.clear()
+            poema.controls.clear()
             page.update()
 
             instruccion_imagen = (
@@ -290,7 +624,7 @@ def vista(page):
                 texto_leido.strip() if isinstance(texto_leido, str) else ""
             )
             if not texto_leido:
-                versos.controls.clear()
+                poema.controls.clear()
                 mensaje.value = (
                     "No encontré texto legible en la imagen. Prueba con una "
                     "foto más clara y cercana."
@@ -312,7 +646,6 @@ def vista(page):
             instruccion_imagen_rima = (
                 f"{INSTRUCCION} Compón los versos para que rimen con esta "
                 f"frase leída de la imagen: {texto_leido!r}. "
-                f"Usa el estilo musical {estilo.value}."
             )
             await generar_rima(
                 texto_leido,
@@ -360,10 +693,7 @@ def vista(page):
             instruccion_documento = (
                 "Resume o toma inspiración del documento proporcionado para "
                 "componer una rima original de exactamente cuatro versos. "
-                "Usa el estilo musical "
-                f"{estilo.value}. Devuelve únicamente un objeto JSON con la "
-                "clave \"versos\", cuyo valor sea una lista de exactamente "
-                "cuatro cadenas."
+                f"Usa el estilo musical {estilo.value}. {INSTRUCCION}"
             )
             await generar_rima(
                 documento,
@@ -501,7 +831,10 @@ def vista(page):
             actualizar_carga(False)
 
     boton.on_click = crear_rima
+    boton_copiar.on_click = copiar_rima
+    boton_escuchar.on_click = escuchar_rima
     boton_microfono.on_click = grabar_voz
     boton_foto.on_click = crear_rima_desde_foto
     boton_texto.on_click = crear_rima_desde_texto
+    humor.on_change = actualizar_humor
     return vista_app
